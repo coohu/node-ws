@@ -1,0 +1,88 @@
+package main
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"log"
+	"net"
+	"os"
+	"strings"
+	"sync"
+)
+
+// 配置 (同前)
+var (
+	UUID = os.Getenv("UUID") // 确保设置了 UUID
+	PORT = "3000"
+)
+
+var bufPool = sync.Pool{
+	New: func() interface{} { return make([]byte, 32*1024) },
+}
+
+func main() {
+	if UUID == "" {
+		UUID = "5efabea4-f6d4-91fd-b8f0-17e004c89c60" // 默认 fallback
+	}
+
+	listener, err := net.Listen("tcp", ":"+PORT)
+	if err != nil {
+		log.Fatalf("Failed to listen on port %s: %v", PORT, err)
+	}
+	log.Printf("TCP Server running on port %s", PORT)
+
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			log.Printf("Accept error: %v", err)
+			continue
+		}
+		go handleConnection(conn)
+	}
+}
+
+func handleConnection(conn net.Conn) {
+	// conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+    // 注意：握手成功后需要清除 Deadline，否则长连接会断开
+
+	// 读取前几个字节来判断协议
+	// 也就是 Peek，但在 Go net.Conn 中我们通常直接读入缓冲
+	buf := make([]byte, 1024) 
+	n, err := conn.Read(buf)
+	if err != nil {
+		conn.Close()
+		return
+	}
+	firstMsg := buf[:n]
+
+	// 1. 判断 VLESS (UUID 验证)
+	// VLESS 头部: [Version(1)] [UUID(16)] ...
+	cleanUUID := strings.ReplaceAll(UUID, "-", "")
+	uuidBytes, _ := hex.DecodeString(cleanUUID)
+	
+	if len(firstMsg) > 17 && firstMsg[0] == 0 && string(firstMsg[1:17]) == string(uuidBytes) {
+		// 这是一个 VLESS TCP 连接
+		handleVlessTCP(conn, firstMsg)
+		return
+	}
+
+	// 2. 判断 Trojan (SHA224 验证)
+	// Trojan 头部: [Hex(SHA224(Password))(56)] [CRLF(2)] [Cmd(1)] ...
+	if len(firstMsg) >= 56 {
+		targetHash := sha256.Sum224([]byte(UUID))
+		targetHex := hex.EncodeToString(targetHash[:])
+		if string(firstMsg[:56]) == targetHex {
+			// 这是一个 Trojan TCP 连接
+			handleTrojanTCP(conn, firstMsg)
+			return
+		}
+	}
+	
+	// 既不是 VLESS 也不是 Trojan，关闭连接或作为 HTTP 响应（防探测）
+	conn.Close()
+}
+
+// 具体处理逻辑与 WebSocket 版本类似，只是不需要处理 wsStream
+// 此处省略 doProxy 等重复代码，逻辑是一样的
+// 注意：TCP VLESS 不需要返回 WebSocket 的握手响应，但 VLESS 协议本身可能需要响应版本信息，这取决于具体 VLESS 头的定义。
+// 标准 VLESS TCP 收到 Request 后，如果通过验证，直接开始转发，不需要像 WS 那样升级协议。
