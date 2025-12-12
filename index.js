@@ -142,9 +142,7 @@ function handleTrojanConnection(ws, msg) {
   try {
     if (msg.length < 58) return false;
     const receivedPasswordHash = msg.slice(0, 56).toString();
-    const possiblePasswords = [
-      UUID,
-    ];
+    const possiblePasswords = [UUID];
     
     let matchedPassword = null;
     for (const pwd of possiblePasswords) {
@@ -222,7 +220,7 @@ wss.on('connection', (ws, req) => {
   ws.once('message', msg => {
     if (msg.length > 17 && msg[0] === 0) {
       const id = msg.slice(1, 17);
-      const isVless = id.every((v, i) => v == parseInt(uuid.substr(i * 2, 2), 16));
+      const isVless = id.every((v, i) => v == parseInt(uuid.substring(i * 2, 2), 16));
       if (isVless) {
         if (!handleVlessConnection(ws, msg)) {
           ws.close();
