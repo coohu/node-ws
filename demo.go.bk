@@ -1,0 +1,149 @@
+package main
+
+import (
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+
+	"github.com/gorilla/websocket"
+)
+
+// 配置 WebSocket Upgrader
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	//为了演示方便，允许所有跨域请求。生产环境请根据需要配置 CheckOrigin
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
+}
+
+// 1. WebSocket 处理器 (/ws)
+func handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	// 将 HTTP 连接升级为 WebSocket 连接
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println("Upgrade error:", err)
+		return
+	}
+	defer conn.Close()
+
+	log.Println("Client connected to WebSocket")
+
+	for {
+		// 读取消息
+		messageType, p, err := conn.ReadMessage()
+		if err != nil {
+			log.Println("Read error:", err)
+			break
+		}
+		log.Printf("Received: %s\n", p)
+
+		// 回写消息 (Echo)
+		if err := conn.WriteMessage(messageType, p); err != nil {
+			log.Println("Write error:", err)
+			break
+		}
+	}
+}
+
+// 2. HTTP Echo 服务处理器 (/sub)
+func handleEcho(w http.ResponseWriter, r *http.Request) {
+	// 设置响应头
+	w.Header().Set("Content-Type", "text/plain")
+	
+	// 读取 Body
+	body, _ := io.ReadAll(r.Body)
+	defer r.Body.Close()
+
+	// 构造响应内容
+	response := fmt.Sprintf("Echo Service Reached!\nMethod: %s\nPath: %s\nBody: %s\n", 
+		r.Method, r.URL.Path, string(body))
+
+	// 发送响应
+	w.Write([]byte(response))
+	log.Printf("Handled request for /sub")
+}
+
+func main() {
+	// 配置静态文件目录 (例如当前目录下的 ./static 文件夹)
+	staticDir := "./static"
+	
+	// 创建文件服务器 Handler
+	fileServer := http.FileServer(http.Dir(staticDir))
+
+	// --- 路由配置 ---
+
+	// 1. WebSocket 服务挂载在 /ws
+	http.HandleFunc("/ws", handleWebSocket)
+
+	// 2. Echo 服务挂载在 /sub
+	// 注意：这就匹配 /sub 和 /sub/ 下的所有路径
+	http.HandleFunc("/sub", handleEcho) 
+    // 如果你希望 /sub/ 下的路径也能被处理，使用 HandleFunc("/sub/", ...) 
+
+	// 3. 静态网站挂载在根目录 /
+	// 注意："/" 是通配符，它会匹配所有未被上面定义的路由
+	http.Handle("/", fileServer)
+
+	// --- 启动服务 ---
+	port := ":8080"
+	fmt.Printf("Server starting on http://localhost%s\n", port)
+	fmt.Println(" - Static Site: /")
+	fmt.Println(" - WebSocket:   /ws")
+	fmt.Println(" - Echo API:    /sub")
+	
+	err := http.ListenAndServe(port, nil)
+	if err != nil {
+		log.Fatal("ListenAndServe: ", err)
+	}
+}
+
+
+
+
+// # ================================
+// # 第一阶段：构建 (Builder)
+// # ================================
+// FROM golang:1.21-alpine AS builder
+
+// # 设置工作目录
+// WORKDIR /app
+
+// # 为了利用 Docker 缓存机制，先复制依赖文件并下载
+// # 这样如果只修改代码而不修改依赖，就不会重新下载库
+// COPY go.mod go.sum ./
+// RUN go mod download
+
+// # 复制源代码和静态资源
+// COPY . .
+
+// # 编译 Go 程序
+// # CGO_ENABLED=0: 禁用 CGO，生成静态链接的二进制文件（更通用）
+// # GOOS=linux: 指定目标系统为 Linux
+// RUN CGO_ENABLED=0 GOOS=linux go build -o my-server main.go
+
+// # ================================
+// # 第二阶段：运行 (Runner)
+// # ================================
+// FROM alpine:latest
+
+// # 安装基础证书（如果程序需要发起 HTTPS 请求，这一步是必须的，虽然本例只是作为服务端）
+// # RUN apk --no-cache add ca-certificates
+
+// # 设置工作目录
+// WORKDIR /app
+
+// # 从构建阶段复制编译好的二进制文件
+// COPY --from=builder /app/my-server .
+
+// # !重要!：复制静态文件目录
+// # 程序中写的是 "./static"，所以必须将其复制到工作目录下
+// COPY --from=builder /app/build ./static
+
+// # 暴露端口
+// EXPOSE 8080
+
+// # 启动命令
+// CMD ["./my-server"]

@@ -11,8 +11,8 @@ FROM gcr.io/distroless/base-debian12
 
 WORKDIR /app
 COPY --from=builder /app/app /app/app
-COPY index.html /app/index.html
+ COPY --from=builder /app/build ./build
 
 USER nonroot:nonroot
-EXPOSE 3000
+EXPOSE 3003
 ENTRYPOINT ["/app/app"]

@@ -22,17 +22,12 @@ import (
 
 var (
 	UUID        = getEnv("UUID", "5efabea4-f6d4-91fd-b8f0-17e004c89c60")
-	NEZHA_SERVER = getEnv("NEZHA_SERVER", "")
-	NEZHA_PORT   = getEnv("NEZHA_PORT", "")
-	NEZHA_KEY    = getEnv("NEZHA_KEY", "")
 	DOMAIN       = getEnv("DOMAIN", "1234.abc.com")
-	AUTO_ACCESS  = getEnv("AUTO_ACCESS", "false") == "true"
 	WSPATH       = getEnv("WSPATH", UUID[:8])
 	SUB_PATH     = getEnv("SUB_PATH", "sub")
 	NAME         = getEnv("NAME", "")
 	PORT         = getEnv("PORT", "3000")
 
-	// 内存池，优化 GC
 	bufPool = sync.Pool{
 		New: func() interface{} {
 			return make([]byte, 64*1024) // 64KB buffer
@@ -44,14 +39,12 @@ var (
 	uuidBytes []byte
 	currentISP atomic.Value // string
 	trojanPasswordHex string
-	indexHTML []byte
 )
 
 func init() {
 	currentISP.Store("Unknown")
 	h := sha256.Sum224([]byte(UUID))
     trojanPasswordHex = hex.EncodeToString(h[:])
-	indexHTML, _ = os.ReadFile("index.html")
 
 	cleanUUID := strings.ReplaceAll(UUID, "-", "")
 	var err error
@@ -63,26 +56,15 @@ func init() {
 
 func main() {
 	go getISP()
-	http.HandleFunc("/", handleRoot)
+	staticDir := "./build"
+	fileServer := http.FileServer(http.Dir(staticDir))
+	http.Handle("/", fileServer)
 	http.HandleFunc("/"+SUB_PATH, handleSub)
 	http.HandleFunc("/"+WSPATH, handleWebSocket)
 
 	log.Printf("Server is running on port %s", PORT)
 	if err := http.ListenAndServe(":"+PORT, nil); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
-	}
-}
-
-func handleRoot(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html")
-	if len(indexHTML) > 0  {
-		w.Write(indexHTML)
-	} else {
-		w.Write([]byte("Hello world!"))
 	}
 }
 
