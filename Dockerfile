@@ -1,13 +1,16 @@
-FROM node:20-alpine3.20
+FROM golang:1.22 AS builder
 
-WORKDIR /tmp
+WORKDIR /app
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -ldflags="-s -w" -o app
 
-COPY index.js package.json ./
+FROM gcr.io/distroless/base-debian12
+
+WORKDIR /app
+COPY --from=builder /app/app /app/app
 
 EXPOSE 3000
+USER nonroot:nonroot
 
-RUN apk update && apk add --no-cache bash openssl curl &&\
-    chmod +x index.js &&\
-    npm install
-
-CMD ["node", "index.js"]
+ENTRYPOINT ["/app/app"]

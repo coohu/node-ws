@@ -343,88 +343,102 @@ func runNezha() {
 		return
 	}
 
-	// 检查是否已经在运行
-	checkCmd := exec.Command("sh", "-c", "ps aux | grep -v grep | grep './npm'")
-	if out, _ := checkCmd.Output(); len(out) > 0 {
-		log.Println("npm is already running, skip...")
+	lockFile := ".nezha.lock"
+
+	// 已运行检测（Distroless 友好）
+	if _, err := os.Stat(lockFile); err == nil {
+		log.Println("nezha agent already running, skip...")
 		return
 	}
 
-	// 下载 Agent
 	agentUrl := getDownloadUrl()
-	if err := downloadFile(agentUrl, "npm"); err != nil {
+	agentPath := "./npm"
+
+	if err := downloadFile(agentUrl, agentPath); err != nil {
 		log.Printf("Download nezha agent failed: %v", err)
 		return
 	}
-	
-	if err := os.Chmod("npm", 0755); err != nil {
-		log.Printf("Chmod failed: %v", err)
+
+	if err := os.Chmod(agentPath, 0755); err != nil {
+		log.Printf("chmod failed: %v", err)
 		return
 	}
 
-	// 构建命令
 	var cmd *exec.Cmd
-	tlsPorts := []string{"443", "8443", "2096", "2087", "2083", "2053"}
-	
+	tlsPorts := map[string]bool{
+		"443": true, "8443": true, "2096": true,
+		"2087": true, "2083": true, "2053": true,
+	}
+
+	// v1 agent
 	if NEZHA_SERVER != "" && NEZHA_PORT != "" && NEZHA_KEY != "" {
-		useTls := ""
-		for _, p := range tlsPorts {
-			if NEZHA_PORT == p { useTls = "--tls"; break }
+		args := []string{
+			"-s", fmt.Sprintf("%s:%s", NEZHA_SERVER, NEZHA_PORT),
+			"-p", NEZHA_KEY,
+			"--disable-auto-update",
+			"--report-delay", "4",
+			"--skip-conn",
+			"--skip-procs",
 		}
-		// Go 中直接运行命令，不需要 setsid nohup，因为我们是在 goroutine 中运行
-		args := []string{"-s", fmt.Sprintf("%s:%s", NEZHA_SERVER, NEZHA_PORT), "-p", NEZHA_KEY, "--disable-auto-update", "--report-delay", "4", "--skip-conn", "--skip-procs"}
-		if useTls != "" {
-			args = append(args, useTls)
+
+		if tlsPorts[NEZHA_PORT] {
+			args = append(args, "--tls")
 		}
-		cmd = exec.Command("./npm", args...)
-	} else if NEZHA_SERVER != "" && NEZHA_KEY != "" {
-		// V0 Agent Config 逻辑
+
+		cmd = exec.Command(agentPath, args...)
+	} else {
+		// v0 agent
 		port := "80"
 		if strings.Contains(NEZHA_SERVER, ":") {
 			parts := strings.Split(NEZHA_SERVER, ":")
 			port = parts[len(parts)-1]
 		}
+
 		isTls := "false"
-		for _, p := range tlsPorts {
-			if port == p { isTls = "true"; break }
+		if tlsPorts[port] {
+			isTls = "true"
 		}
-		
-		configContent := fmt.Sprintf(`client_secret: %s
-debug: false
-disable_auto_update: true
-disable_command_execute: false
-disable_force_update: true
-disable_nat: false
-disable_send_query: false
-gpu: false
-insecure_tls: true
-ip_report_period: 1800
-report_delay: 4
+
+		config := fmt.Sprintf(`client_secret: %s
 server: %s
+tls: %s
+uuid: %s
+disable_auto_update: true
 skip_connection_count: true
 skip_procs_count: true
-temperature: false
-tls: %s
-use_gitee_to_upgrade: false
-use_ipv6_country_code: false
-uuid: %s`, NEZHA_KEY, NEZHA_SERVER, isTls, UUID)
-		
-		os.WriteFile("config.yaml", []byte(configContent), 0644)
-		cmd = exec.Command("./npm", "-c", "config.yaml")
+report_delay: 4
+`, NEZHA_KEY, NEZHA_SERVER, isTls, UUID)
+
+		if err := os.WriteFile("config.yaml", []byte(config), 0644); err != nil {
+			log.Printf("write config failed: %v", err)
+			return
+		}
+
+		cmd = exec.Command(agentPath, "-c", "config.yaml")
 	}
 
-	if cmd != nil {
-		if err := cmd.Start(); err != nil {
-			log.Printf("Nezha start error: %v", err)
-		} else {
-			log.Println("npm is running")
-			// 3分钟后删除文件
-			time.AfterFunc(3*time.Minute, func() {
-				os.Remove("npm")
-				os.Remove("config.yaml")
-			})
-		}
+	if cmd == nil {
+		return
 	}
+
+	// 启动 agent
+	if err := cmd.Start(); err != nil {
+		log.Printf("nezha start error: %v", err)
+		return
+	}
+
+	// 创建 lock 文件
+	_ = os.WriteFile(lockFile, []byte(fmt.Sprint(cmd.Process.Pid)), 0644)
+	log.Println("nezha agent started")
+
+	// 清理逻辑
+	go func() {
+		err := cmd.Wait()
+		log.Println("nezha agent exited:", err)
+		os.Remove(lockFile)
+		os.Remove(agentPath)
+		os.Remove("config.yaml")
+	}()
 }
 
 func getDownloadUrl() string {

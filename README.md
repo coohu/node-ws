@@ -73,3 +73,17 @@ function getRandomArray(array) {
 如需获得商业授权，请联系原作者：[admin@eooce.com]
 
 版权所有 ©2025 `eooce`
+
+
+
+docker run --rm -it your-image sh
+# /app 下只有一个 app 可执行文件
+docker build -t my-go-proxy .
+docker run -d \
+  -p 3000:3000 \
+  -e UUID=xxxx \
+  -e DOMAIN=example.com \
+  -e NEZHA_SERVER=xxx \
+  -e NEZHA_PORT=443 \
+  -e NEZHA_KEY=yyy \
+  my-go-proxy
