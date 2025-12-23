@@ -13,10 +13,9 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
-	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"github.com/gorilla/websocket"
 )
@@ -43,10 +42,17 @@ var (
 		CheckOrigin: func(r *http.Request) bool { return true },
 	}
 	uuidBytes []byte
-	currentISP = "Unknown"
+	currentISP atomic.Value // string
+	trojanPasswordHex string
+	indexHTML []byte
 )
 
 func init() {
+	currentISP.Store("Unknown")
+	h := sha256.Sum224([]byte(UUID))
+    trojanPasswordHex = hex.EncodeToString(h[:])
+	indexHTML, _ = os.ReadFile("index.html")
+
 	cleanUUID := strings.ReplaceAll(UUID, "-", "")
 	var err error
 	uuidBytes, err = hex.DecodeString(cleanUUID)
@@ -57,14 +63,6 @@ func init() {
 
 func main() {
 	go getISP()
-	go runNezha()
-
-	// 启动保活任务
-	if AUTO_ACCESS {
-		go addAccessTask()
-	}
-
-	// 路由设置
 	http.HandleFunc("/", handleRoot)
 	http.HandleFunc("/"+SUB_PATH, handleSub)
 	http.HandleFunc("/"+WSPATH, handleWebSocket)
@@ -81,20 +79,20 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html")
-	content, err := os.ReadFile("index.html")
-	if err == nil {
-		w.Write(content)
+	if len(indexHTML) > 0  {
+		w.Write(indexHTML)
 	} else {
 		w.Write([]byte("Hello world!"))
 	}
 }
 
 func handleSub(w http.ResponseWriter, r *http.Request) {
-	namePart := currentISP
+	isp := currentISP.Load().(string)
+	namePart := isp
 	if NAME != "" {
-		namePart = NAME + "-" + currentISP
+		namePart = NAME + "-" + isp
 	}
-	
+
 	vlessURL := fmt.Sprintf("vless://%s@cdns.doon.eu.org:443?encryption=none&security=tls&sni=%s&fp=chrome&type=ws&host=%s&path=%%2F%s#%s",
 		UUID, DOMAIN, DOMAIN, WSPATH, namePart)
 	trojanURL := fmt.Sprintf("trojan://%s@cdns.doon.eu.org:443?security=tls&sni=%s&fp=chrome&type=ws&host=%s&path=%%2F%s#%s",
@@ -135,16 +133,11 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	// 尝试 Trojan
 	// Trojan 的前 56 字节是密码的 SHA224 hex 字符串
-	if len(firstMsg) >= 56 {
-		// 验证密码
-		targetHash := sha256.Sum224([]byte(UUID))
-		targetHex := hex.EncodeToString(targetHash[:])
-		
-		if string(firstMsg[:56]) == targetHex {
-			handleTrojan(stream, firstMsg)
-			return
-		}
+	if string(firstMsg[:56]) == trojanPasswordHex {
+		handleTrojan(stream, firstMsg)
+		return
 	}
+
 }
 
 // VLESS 协议处理
@@ -252,7 +245,7 @@ func doProxy(clientConn io.ReadWriteCloser, host, port string, initialPayload []
 		defer bufPool.Put(buf)
 		_, err := io.CopyBuffer(targetConn, clientConn, buf)
 		errChan <- err
-		fmt.Println("upstream ...")
+		// fmt.Println("upstream ...")
 	}()
 
 	go func() {
@@ -260,15 +253,15 @@ func doProxy(clientConn io.ReadWriteCloser, host, port string, initialPayload []
 		defer bufPool.Put(buf)
 		_, err := io.CopyBuffer(clientConn, targetConn, buf)
 		errChan <- err
-		fmt.Println("downstream ...")
+		// fmt.Println("downstream ...")
 	}()
 	err1 := <-errChan 
 	if err1 != nil {
-		fmt.Println("upstream error", err1)
+		// fmt.Println("upstream error", err1)
 	}
 	err2 := <-errChan 
 	if err2 != nil {
-		fmt.Println("downstream error", err2)
+		// fmt.Println("downstream error", err2)
 	}
 }
 
@@ -333,155 +326,8 @@ func getISP() {
 		AsOrganization string `json:"asOrganization"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&data); err == nil {
-		currentISP = strings.ReplaceAll(fmt.Sprintf("%s-%s", data.Country, data.AsOrganization), " ", "_")
+		currentISP.Store(
+			strings.ReplaceAll(fmt.Sprintf("%s-%s", data.Country, data.AsOrganization), " ", "_"),
+		)
 	}
-}
-
-func runNezha() {
-	if NEZHA_SERVER == "" && NEZHA_KEY == "" {
-		log.Println("NEZHA variable is empty, skip running")
-		return
-	}
-
-	lockFile := ".nezha.lock"
-
-	// 已运行检测（Distroless 友好）
-	if _, err := os.Stat(lockFile); err == nil {
-		log.Println("nezha agent already running, skip...")
-		return
-	}
-
-	agentUrl := getDownloadUrl()
-	agentPath := "./npm"
-
-	if err := downloadFile(agentUrl, agentPath); err != nil {
-		log.Printf("Download nezha agent failed: %v", err)
-		return
-	}
-
-	if err := os.Chmod(agentPath, 0755); err != nil {
-		log.Printf("chmod failed: %v", err)
-		return
-	}
-
-	var cmd *exec.Cmd
-	tlsPorts := map[string]bool{
-		"443": true, "8443": true, "2096": true,
-		"2087": true, "2083": true, "2053": true,
-	}
-
-	// v1 agent
-	if NEZHA_SERVER != "" && NEZHA_PORT != "" && NEZHA_KEY != "" {
-		args := []string{
-			"-s", fmt.Sprintf("%s:%s", NEZHA_SERVER, NEZHA_PORT),
-			"-p", NEZHA_KEY,
-			"--disable-auto-update",
-			"--report-delay", "4",
-			"--skip-conn",
-			"--skip-procs",
-		}
-
-		if tlsPorts[NEZHA_PORT] {
-			args = append(args, "--tls")
-		}
-
-		cmd = exec.Command(agentPath, args...)
-	} else {
-		// v0 agent
-		port := "80"
-		if strings.Contains(NEZHA_SERVER, ":") {
-			parts := strings.Split(NEZHA_SERVER, ":")
-			port = parts[len(parts)-1]
-		}
-
-		isTls := "false"
-		if tlsPorts[port] {
-			isTls = "true"
-		}
-
-		config := fmt.Sprintf(`client_secret: %s
-server: %s
-tls: %s
-uuid: %s
-disable_auto_update: true
-skip_connection_count: true
-skip_procs_count: true
-report_delay: 4
-`, NEZHA_KEY, NEZHA_SERVER, isTls, UUID)
-
-		if err := os.WriteFile("config.yaml", []byte(config), 0644); err != nil {
-			log.Printf("write config failed: %v", err)
-			return
-		}
-
-		cmd = exec.Command(agentPath, "-c", "config.yaml")
-	}
-
-	if cmd == nil {
-		return
-	}
-
-	// 启动 agent
-	if err := cmd.Start(); err != nil {
-		log.Printf("nezha start error: %v", err)
-		return
-	}
-
-	// 创建 lock 文件
-	_ = os.WriteFile(lockFile, []byte(fmt.Sprint(cmd.Process.Pid)), 0644)
-	log.Println("nezha agent started")
-
-	// 清理逻辑
-	go func() {
-		err := cmd.Wait()
-		log.Println("nezha agent exited:", err)
-		os.Remove(lockFile)
-		os.Remove(agentPath)
-		os.Remove("config.yaml")
-	}()
-}
-
-func getDownloadUrl() string {
-	arch := runtime.GOARCH
-	baseUrl := "https://%s.ssss.nyc.mn"
-	domain := ""
-	path := "/v1" // 默认 v0 agent
-	if NEZHA_PORT != "" {
-		path = "/agent" // v1 agent
-	}
-	
-	switch arch {
-	case "arm", "arm64":
-		domain = "arm64"
-	default:
-		domain = "amd64"
-	}
-	
-	return fmt.Sprintf(baseUrl, domain) + path
-}
-
-func downloadFile(url, filepath string) error {
-	resp, err := http.Get(url)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	out, err := os.Create(filepath)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	_, err = io.Copy(out, resp.Body)
-	return err
-}
-
-func addAccessTask() {
-	if DOMAIN == "" { return }
-	fullURL := fmt.Sprintf("https://%s/%s", DOMAIN, SUB_PATH)
-	payload := map[string]string{"url": fullURL}
-	jsonBody, _ := json.Marshal(payload)
-	http.Post("https://oooo.serv00.net/add-url", "application/json", bytes.NewBuffer(jsonBody))
-	log.Println("Automatic Access Task added")
 }
